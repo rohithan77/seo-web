@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+*.egg-info/
+
+# Sessions (runtime data — not for git)
+backend/sessions/
+
+# Node
+node_modules/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/settings.json
+.idea/
+
+# Exports / uploads (runtime)
+backend/exports/
+backend/uploads/
