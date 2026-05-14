@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Search, Zap, Shield, BarChart3, ArrowRight } from "lucide-react";
+import { apiFetch } from "@/lib/auth";
 
 export default function Home() {
   const router = useRouter();
@@ -16,7 +17,7 @@ export default function Home() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/audit/start", {
+      const res = await apiFetch("/api/audit/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim() }),
@@ -80,7 +81,7 @@ export default function Home() {
       {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
 
       <p className="mt-4 text-xs text-slate-400">
-        No login required · WordPress credentials only asked when making changes · You stay in control
+        Your audits are saved · WordPress credentials only asked when making changes · You stay in control
       </p>
 
       {/* Feature pills */}

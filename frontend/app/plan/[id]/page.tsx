@@ -3,6 +3,7 @@
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import { CheckSquare, Square, ArrowRight, Loader2, Calendar, Zap } from "lucide-react";
+import { apiFetch } from "@/lib/auth";
 
 type Task = {
   id: string; week: number; title: string; description: string;
@@ -34,7 +35,7 @@ export default function PlanPage({ params }: { params: Promise<{ id: string }> }
   const [approving, setApproving] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/plan/${id}`)
+    apiFetch(`/api/plan/${id}`)
       .then((r) => r.json())
       .then(setPlan);
   }, [id]);
@@ -50,7 +51,7 @@ export default function PlanPage({ params }: { params: Promise<{ id: string }> }
 
   async function handleApprove() {
     setApproving(true);
-    await fetch(`/api/plan/${id}/approve`, {
+    await apiFetch(`/api/plan/${id}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ skip_task_ids: Array.from(skipped) }),

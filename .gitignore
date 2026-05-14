@@ -24,6 +24,10 @@ Thumbs.db
 .vscode/settings.json
 .idea/
 
+# Env files
+.env.local
+backend/users.json
+
 # Exports / uploads (runtime)
 backend/exports/
 backend/uploads/

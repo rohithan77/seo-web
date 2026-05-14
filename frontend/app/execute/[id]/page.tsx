@@ -5,6 +5,7 @@ import {
   CheckCircle, XCircle, Loader2, Lock, ChevronRight,
   SkipForward, Play, Pause, Eye, BookOpen, X, Trophy,
 } from "lucide-react";
+import { apiFetch } from "@/lib/auth";
 
 type Task = {
   id: string; week: number; title: string; description: string;
@@ -258,7 +259,7 @@ function ManualPanel({ taskId, sessionId, title, onClose, onMarkDone }: {
   const [steps, setSteps] = useState<ManualStep[] | null>(null);
 
   useEffect(() => {
-    fetch(`/api/execute/${sessionId}/manual/${taskId}`)
+    apiFetch(`/api/execute/${sessionId}/manual/${taskId}`)
       .then((r) => r.json())
       .then((d) => setSteps(d.instructions || []));
   }, [taskId, sessionId]);
@@ -338,7 +339,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
   const stopRef = useRef(false);
 
   async function refresh(): Promise<ExecStatus | null> {
-    const res = await fetch(`/api/execute/${id}/status`);
+    const res = await apiFetch(`/api/execute/${id}/status`);
     if (res.ok) {
       const data = await res.json();
       setStatus(data);
@@ -361,7 +362,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
       body.wp_username = wpCreds.username;
       body.wp_app_password = wpCreds.password;
     }
-    const res = await fetch(`/api/execute/${id}/preview`, {
+    const res = await apiFetch(`/api/execute/${id}/preview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -382,7 +383,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
       body.wp_app_password = wpCreds.password;
     }
     try {
-      const res = await fetch(`/api/execute/${id}/task`, {
+      const res = await apiFetch(`/api/execute/${id}/task`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -406,7 +407,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
   }
 
   async function markManualDone(taskId: string) {
-    await fetch(`/api/execute/${id}/task`, {
+    await apiFetch(`/api/execute/${id}/task`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task_id: taskId, skip: false, approved_content: { manual: true } }),
@@ -529,7 +530,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
 
   async function skipTask(taskId: string) {
     setRunningTaskId(taskId);
-    await fetch(`/api/execute/${id}/task`, {
+    await apiFetch(`/api/execute/${id}/task`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task_id: taskId, skip: true }),

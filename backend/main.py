@@ -20,16 +20,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from typing import Optional
 
 from models import ExecuteTaskRequest, PreviewTaskRequest, Task, TaskResult
 from audit import run_audit
 from planner import generate_plan
 from executor import execute_task, preview_task
+import auth as auth_module
 
 load_dotenv()
 
@@ -41,6 +43,49 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 @app.get("/health")
 async def health():
     return {"status": "ok", "api_key_set": bool(os.getenv("ANTHROPIC_API_KEY"))}
+
+
+# ── Auth helpers ─────────────────────────────────────────────────────────────
+
+def get_current_user(authorization: Optional[str] = Header(None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = auth_module.decode_token(authorization[7:])
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user_id
+
+
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/register")
+async def register(req: AuthRequest):
+    try:
+        user_id = auth_module.register(req.email, req.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = auth_module.make_token(user_id)
+    return {"token": token, "user_id": user_id}
+
+
+@app.post("/api/auth/login")
+async def login(req: AuthRequest):
+    try:
+        user_id = auth_module.login(req.email, req.password)
+    except ValueError as e:
+        raise HTTPException(401, str(e))
+    token = auth_module.make_token(user_id)
+    return {"token": token, "user_id": user_id}
+
+
+@app.get("/api/auth/me")
+async def me(user_id: str = Depends(get_current_user)):
+    return {"user_id": user_id}
 SESSIONS_DIR = Path(os.getenv("SESSIONS_DIR", "./sessions"))
 SESSIONS_DIR.mkdir(exist_ok=True)
 
@@ -113,8 +158,44 @@ async def _run_audit_bg(session_id: str, url: str):
         events.append({"type": "error", "message": str(e)})
 
 
+@app.get("/api/sessions")
+async def list_sessions(user_id: str = Depends(get_current_user)):
+    """Return all sessions belonging to this user, newest first."""
+    sessions = []
+    for entry in SESSIONS_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        meta_file = entry / "meta.json"
+        if not meta_file.exists():
+            continue
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        if meta.get("user_id") != user_id:
+            continue
+        # Derive a simple status label
+        plan_status = entry / "plan_status.json"
+        approved = entry / "approved_plan.json"
+        report = entry / "report.json"
+        if approved.exists():
+            label = "executing"
+        elif plan_status.exists():
+            ps = json.loads(plan_status.read_text())
+            label = "planning" if ps.get("status") == "generating" else "plan_ready"
+        elif report.exists():
+            label = "audited"
+        else:
+            label = "auditing"
+        sessions.append({
+            "session_id": entry.name,
+            "url": meta.get("url", ""),
+            "started_at": meta.get("started_at", ""),
+            "status": label,
+        })
+    sessions.sort(key=lambda s: s["started_at"], reverse=True)
+    return sessions
+
+
 @app.post("/api/audit/start")
-async def start_audit(req: StartAuditRequest):
+async def start_audit(req: StartAuditRequest, user_id: str = Depends(get_current_user)):
     url = req.url.strip()
     if not url.startswith("http"):
         url = "https://" + url
@@ -124,6 +205,7 @@ async def start_audit(req: StartAuditRequest):
     write_json(session_id, "meta.json", {
         "url": url,
         "session_id": session_id,
+        "user_id": user_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "auditing",
     })
@@ -136,7 +218,10 @@ async def start_audit(req: StartAuditRequest):
 
 
 @app.get("/api/audit/{session_id}/stream")
-async def audit_stream(session_id: str):
+async def audit_stream(session_id: str, token: Optional[str] = None):
+    # SSE: EventSource can't set headers, so accept token via query param
+    if not token or not auth_module.decode_token(token):
+        raise HTTPException(status_code=401, detail="Not authenticated")
     get_session_or_404(session_id)
 
     async def generate() -> AsyncGenerator[str, None]:
@@ -158,7 +243,7 @@ async def audit_stream(session_id: str):
 
 
 @app.get("/api/audit/{session_id}/report")
-async def get_report(session_id: str):
+async def get_report(session_id: str, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     report = read_json(session_id, "report.json")
     if not report:
@@ -191,7 +276,7 @@ async def _generate_plan_bg(session_id: str, report_data: dict):
 
 
 @app.post("/api/plan/{session_id}/generate")
-async def generate_plan_endpoint(session_id: str):
+async def generate_plan_endpoint(session_id: str, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     report_data = read_json(session_id, "report.json")
     if not report_data:
@@ -207,7 +292,7 @@ async def generate_plan_endpoint(session_id: str):
 
 
 @app.get("/api/plan/{session_id}")
-async def get_plan(session_id: str):
+async def get_plan(session_id: str, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     status = read_json(session_id, "plan_status.json") or {}
     if status.get("status") == "generating":
@@ -225,7 +310,7 @@ class ApprovePlanRequest(BaseModel):
 
 
 @app.post("/api/plan/{session_id}/approve")
-async def approve_plan(session_id: str, req: ApprovePlanRequest):
+async def approve_plan(session_id: str, req: ApprovePlanRequest, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     plan = read_json(session_id, "plan.json")
     if not plan:
@@ -244,7 +329,7 @@ async def approve_plan(session_id: str, req: ApprovePlanRequest):
 # ── Execute ──────────────────────────────────────────────────────────────────
 
 @app.post("/api/execute/{session_id}/preview")
-async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest):
+async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest, user_id: str = Depends(get_current_user)):
     """
     Generate what the task WOULD do — current values + Claude suggestions — without touching anything.
     Frontend shows this for human review/editing before calling /task to apply.
@@ -285,7 +370,7 @@ async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest):
 
 
 @app.get("/api/execute/{session_id}/manual/{task_id}")
-async def manual_instructions(session_id: str, task_id: str):
+async def manual_instructions(session_id: str, task_id: str, user_id: str = Depends(get_current_user)):
     """
     Returns step-by-step manual instructions for a task so the user can
     do it themselves without providing credentials.
@@ -375,7 +460,7 @@ def _build_manual_instructions(task: Task, site_url: str) -> list[dict]:
 
 
 @app.post("/api/execute/{session_id}/task")
-async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest):
+async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     plan_data = read_json(session_id, "approved_plan.json")
     if not plan_data:
@@ -437,7 +522,7 @@ async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest):
 
 
 @app.get("/api/execute/{session_id}/status")
-async def execution_status(session_id: str):
+async def execution_status(session_id: str, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     plan = read_json(session_id, "approved_plan.json")
     log = read_json(session_id, "task_log.json") or {"tasks": []}
@@ -466,6 +551,6 @@ async def execution_status(session_id: str):
 
 
 @app.get("/api/session/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, user_id: str = Depends(get_current_user)):
     get_session_or_404(session_id)
     return read_json(session_id, "meta.json")

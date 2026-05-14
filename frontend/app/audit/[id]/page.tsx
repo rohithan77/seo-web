@@ -3,6 +3,7 @@
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle, XCircle, Loader2, ChevronDown, ChevronUp, ArrowRight } from "lucide-react";
+import { apiFetch, getToken } from "@/lib/auth";
 
 const DOMAIN_LABELS: Record<string, string> = {
   technical: "Technical SEO",
@@ -50,7 +51,8 @@ export default function AuditPage({ params }: { params: Promise<{ id: string }> 
 
   // SSE stream
   useEffect(() => {
-    const es = new EventSource(`/api/audit/${id}/stream`);
+    const token = getToken();
+    const es = new EventSource(`/api/audit/${id}/stream${token ? `?token=${token}` : ""}`);
     es.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === "progress") {
@@ -61,7 +63,7 @@ export default function AuditPage({ params }: { params: Promise<{ id: string }> 
       } else if (data.type === "complete") {
         setDone(true);
         es.close();
-        fetch(`/api/audit/${id}/report`)
+        apiFetch(`/api/audit/${id}/report`)
           .then((r) => r.json())
           .then(setReport);
       } else if (data.type === "error") {
@@ -76,7 +78,7 @@ export default function AuditPage({ params }: { params: Promise<{ id: string }> 
     setGeneratingPlan(true);
     try {
       // Kick off background generation (returns immediately)
-      const res = await fetch(`/api/plan/${id}/generate`, { method: "POST" });
+      const res = await apiFetch(`/api/plan/${id}/generate`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         alert(`Failed to start plan generation: ${err.detail || res.status}`);
@@ -87,7 +89,7 @@ export default function AuditPage({ params }: { params: Promise<{ id: string }> 
       // Poll until plan is ready (Claude takes 30-60s)
       for (let i = 0; i < 60; i++) {
         await new Promise((r) => setTimeout(r, 3000));
-        const poll = await fetch(`/api/plan/${id}`);
+        const poll = await apiFetch(`/api/plan/${id}`);
         if (!poll.ok) {
           const err = await poll.json().catch(() => ({}));
           alert(`Plan generation failed: ${err.detail || poll.status}`);
