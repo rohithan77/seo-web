@@ -80,12 +80,30 @@ class Plan(BaseModel):
     tasks: list[Task]
 
 
+class PreviewTaskRequest(BaseModel):
+    task_id: str
+    wp_url: Optional[str] = None
+    wp_username: Optional[str] = None
+    wp_app_password: Optional[str] = None
+
+
+class TaskPreview(BaseModel):
+    task_id: str
+    action: str
+    target_url: str
+    summary: str                  # one-line "what will happen"
+    current: dict                 # current live values (meta_title, meta_desc, etc.)
+    suggested: dict               # Claude's proposed new values
+    needs_credentials: bool = False
+
+
 class ExecuteTaskRequest(BaseModel):
     task_id: str
     wp_url: Optional[str] = None
     wp_username: Optional[str] = None
     wp_app_password: Optional[str] = None
     skip: bool = False
+    approved_content: Optional[dict] = None   # user-edited version of suggested content
 
 
 class TaskResult(BaseModel):

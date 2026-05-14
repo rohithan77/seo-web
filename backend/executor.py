@@ -19,7 +19,7 @@ import time
 import requests
 import anthropic
 from urllib.parse import urlparse
-from models import Task, TaskResult
+from models import Task, TaskResult, TaskPreview
 
 
 # ── Claude content generator ──────────────────────────────────────────────────
@@ -275,9 +275,157 @@ def _verify_live(public_url: str, check: str, expected: str, retries: int = 3) -
     return False, "max retries reached"
 
 
+# ── Preview (generates content, touches nothing) ─────────────────────────────
+
+def preview_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str) -> TaskPreview:
+    """
+    Fetch current values and generate Claude's suggestions — without applying anything.
+    Returns a TaskPreview that the frontend shows for user review/editing.
+    """
+    action = task.platform_action
+    target = task.target_url or wp_url
+
+    # Non-WP tasks: nothing to preview on a live page
+    if not action.startswith("wp_"):
+        return TaskPreview(
+            task_id=task.id,
+            action=action,
+            target_url=target,
+            summary=task.description,
+            current={},
+            suggested={"note": "No live-site changes — manual step required."},
+        )
+
+    if not wp_url or not wp_username or not wp_app_password:
+        return TaskPreview(
+            task_id=task.id, action=action, target_url=target,
+            summary=task.description, current={}, suggested={},
+            needs_credentials=True,
+        )
+
+    try:
+        session, api = _session(wp_url, wp_username, wp_app_password)
+
+        # Auth check
+        auth_r = session.get(f"{wp_url.rstrip('/')}/wp-json/wp/v2/users/me", timeout=10)
+        if auth_r.status_code in (401, 403):
+            return TaskPreview(
+                task_id=task.id, action=action, target_url=target,
+                summary="Authentication failed — check credentials.",
+                current={}, suggested={}, needs_credentials=True,
+            )
+
+        post_id, endpoint = _find_post(session, api, target)
+        plugin = _detect_plugin(session, wp_url)
+
+        # Fetch current post state
+        current: dict = {}
+        page_text = ""
+        if post_id:
+            snap = _snapshot(session, api, post_id, endpoint)
+            page_text = re.sub(r'<[^>]+>', ' ', snap["content"])[:1000]
+            current = {
+                "meta_title": snap["title"],
+                "meta_description": snap.get("yoast_seo", {}).get("meta_description", "")
+                    or snap.get("meta", {}).get("rank_math_description", "")
+                    or snap["excerpt"],
+                "canonical": snap.get("yoast_seo", {}).get("canonical", "")
+                    or snap.get("meta", {}).get("rank_math_canonical_url", ""),
+                "excerpt": snap["excerpt"],
+                "plugin": plugin,
+            }
+
+        suggested: dict = {}
+
+        if action == "wp_update_meta":
+            meta_title, meta_desc = _generate_meta(
+                page_title=current.get("meta_title", ""),
+                page_content=page_text,
+                target_url=target,
+                task_description=task.description,
+            )
+            suggested = {"meta_title": meta_title, "meta_description": meta_desc}
+            summary = f'Update meta title and description on {target}'
+
+        elif action == "wp_set_canonical":
+            suggested = {"canonical": target}
+            summary = f'Set canonical URL to {target}'
+
+        elif action == "wp_add_schema":
+            existing_schema_types = []
+            if post_id:
+                r_get = session.get(f"{api}/{endpoint}/{post_id}",
+                                    params={"context": "edit"}, timeout=10)
+                content_raw = r_get.json().get("content", {}).get("raw", "")
+                for s in re.findall(r'application/ld\+json[^>]*>(.*?)</script>',
+                                    content_raw, re.DOTALL | re.IGNORECASE):
+                    try:
+                        d = json.loads(s)
+                        if d.get("@type"):
+                            existing_schema_types.append(str(d["@type"]))
+                    except Exception:
+                        pass
+            schema_obj = _generate_schema(
+                page_title=current.get("meta_title", ""),
+                page_content=page_text,
+                target_url=target,
+                existing_schema_types=existing_schema_types,
+            )
+            suggested = {
+                "schema_type": schema_obj.get("@type", "WebPage"),
+                "schema_json": json.dumps(schema_obj, indent=2),
+                "existing_types": existing_schema_types,
+            }
+            summary = f'Add {schema_obj.get("@type", "WebPage")} JSON-LD schema to {target}'
+
+        elif action == "wp_update_image_alt":
+            images = []
+            if post_id:
+                r_media = session.get(f"{api}/media",
+                                      params={"per_page": 20, "parent": post_id}, timeout=15)
+                for item in r_media.json():
+                    if not item.get("alt_text", "").strip():
+                        img_title = item.get("title", {}).get("rendered", "")
+                        img_slug = item.get("slug", img_title)
+                        suggested_alt = _generate_alt_text(img_title, img_slug, page_text[:200])
+                        images.append({
+                            "id": item["id"],
+                            "filename": img_slug,
+                            "current_alt": "",
+                            "suggested_alt": suggested_alt,
+                        })
+            suggested = {"images": images}
+            summary = f'Add alt text to {len(images)} image(s) on {target}'
+
+        elif action == "wp_update_sitemap":
+            suggested = {"sitemap_url": wp_url.rstrip("/") + "/sitemap.xml",
+                         "action": "Ping Google + Bing with your sitemap URL"}
+            summary = "Ping search engines with updated sitemap"
+
+        else:
+            suggested = {"note": f"Manual step required: {action}"}
+            summary = task.description
+
+        return TaskPreview(
+            task_id=task.id,
+            action=action,
+            target_url=target,
+            summary=summary,
+            current=current,
+            suggested=suggested,
+        )
+
+    except Exception as e:
+        return TaskPreview(
+            task_id=task.id, action=action, target_url=target,
+            summary=f"Preview failed: {e}", current={}, suggested={},
+        )
+
+
 # ── Main executor ─────────────────────────────────────────────────────────────
 
-def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str) -> TaskResult:
+def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str,
+                 approved_content: dict | None = None) -> TaskResult:
     action = task.platform_action
 
     # ── Non-WordPress tasks (no credentials needed) ──────────────────────────
@@ -330,20 +478,27 @@ def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
         # Strip HTML tags for a readable content sample
         page_text = re.sub(r'<[^>]+>', ' ', page_content_raw)[:1000]
 
-        # ── STEP 3: Make the change ──────────────────────────────────────────
+        # ── STEP 3: Make the change ─────────────────────────────────────────
+        # If approved_content is provided, use it directly (user reviewed/edited).
+        # Otherwise generate fresh (fallback for non-preview path).
 
         if action == "wp_update_meta":
             if not post_id:
                 return TaskResult(task_id=task.id, status="failed", action_taken="",
                                   error=f"Could not find post/page matching {target}")
 
-            print(f"[executor] Generating optimized meta for: {target}")
-            meta_title, meta_desc = _generate_meta(
-                page_title=page_title,
-                page_content=page_text,
-                target_url=target,
-                task_description=task.description,
-            )
+            if approved_content and "meta_title" in approved_content:
+                meta_title = approved_content["meta_title"][:60]
+                meta_desc = approved_content["meta_description"][:155]
+                print(f"[executor] Using approved meta for: {target}")
+            else:
+                print(f"[executor] Generating optimized meta for: {target}")
+                meta_title, meta_desc = _generate_meta(
+                    page_title=page_title,
+                    page_content=page_text,
+                    target_url=target,
+                    task_description=task.description,
+                )
             print(f"[executor] Meta title ({len(meta_title)} chars): {meta_title}")
             print(f"[executor] Meta desc ({len(meta_desc)} chars): {meta_desc}")
 
@@ -359,15 +514,13 @@ def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
                     "rank_math_description": meta_desc,
                 }
             else:
-                # Fallback: set excerpt (visible to some themes as snippet)
                 payload["excerpt"] = meta_desc
 
             r = session.post(f"{api}/{endpoint}/{post_id}", json=payload, timeout=15)
             r.raise_for_status()
             action_desc = f'Updated meta on {target} — title: "{meta_title}"'
-            # Verify by checking the description appears on the live page
             verify_check = "meta_description"
-            verify_expected = meta_desc[:40]  # first 40 chars is enough signal
+            verify_expected = meta_desc[:40]
 
         elif action == "wp_set_canonical":
             if not post_id:
@@ -410,15 +563,20 @@ def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
                 except Exception:
                     pass
 
-            print(f"[executor] Generating schema for {target} (existing: {existing_schema_types})")
-            schema_obj = _generate_schema(
-                page_title=page_title,
-                page_content=page_text,
-                target_url=target,
-                existing_schema_types=existing_schema_types,
-            )
-            schema_type = schema_obj.get("@type", "WebPage")
-            schema_json = json.dumps(schema_obj, indent=2)
+            if approved_content and "schema_json" in approved_content:
+                schema_json = approved_content["schema_json"]
+                schema_type = approved_content.get("schema_type", "WebPage")
+                print(f"[executor] Using approved schema for: {target}")
+            else:
+                print(f"[executor] Generating schema for {target} (existing: {existing_schema_types})")
+                schema_obj = _generate_schema(
+                    page_title=page_title,
+                    page_content=page_text,
+                    target_url=target,
+                    existing_schema_types=existing_schema_types,
+                )
+                schema_type = schema_obj.get("@type", "WebPage")
+                schema_json = json.dumps(schema_obj, indent=2)
             schema_block = (
                 f'\n<script type="application/ld+json">\n{schema_json}\n</script>\n'
             )
@@ -434,15 +592,21 @@ def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
         elif action == "wp_update_image_alt":
             updated = 0
             skipped = 0
+            # approved_content["images"] = [{ id, suggested_alt (user-edited) }, ...]
+            approved_alts = {img["id"]: img["suggested_alt"]
+                             for img in (approved_content or {}).get("images", [])}
             if post_id:
                 r_media = session.get(f"{api}/media",
                                       params={"per_page": 50, "parent": post_id}, timeout=15)
                 for item in r_media.json():
                     if not item.get("alt_text", "").strip():
-                        img_title = item.get("title", {}).get("rendered", "")
-                        img_filename = item.get("slug", img_title)
-                        print(f"[executor] Generating alt text for: {img_title or img_filename}")
-                        alt = _generate_alt_text(img_title, img_filename, page_text[:200])
+                        if item["id"] in approved_alts:
+                            alt = approved_alts[item["id"]]
+                        else:
+                            img_title = item.get("title", {}).get("rendered", "")
+                            img_filename = item.get("slug", img_title)
+                            print(f"[executor] Generating alt text for: {img_title or img_filename}")
+                            alt = _generate_alt_text(img_title, img_filename, page_text[:200])
                         session.post(f"{api}/media/{item['id']}",
                                      json={"alt_text": alt}, timeout=10)
                         print(f"[executor]   → {alt!r}")
