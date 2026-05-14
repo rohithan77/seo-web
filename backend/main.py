@@ -17,27 +17,34 @@ import json
 import asyncio
 import os
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from typing import Optional
 
 from models import ExecuteTaskRequest, PreviewTaskRequest, Task, TaskResult
 from audit import run_audit
 from planner import generate_plan
 from executor import execute_task, preview_task
 import auth as auth_module
+from db import db_create_session, db_get_session, db_update_session, db_get_user_sessions
 
 load_dotenv()
 
 app = FastAPI(title="SEO Agent API")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL, "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
@@ -54,6 +61,13 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
+
+
+def _get_session_or_404(session_id: str) -> dict:
+    session = db_get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session {session_id} not found")
+    return session
 
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
@@ -86,51 +100,9 @@ async def login(req: AuthRequest):
 @app.get("/api/auth/me")
 async def me(user_id: str = Depends(get_current_user)):
     return {"user_id": user_id}
-SESSIONS_DIR = Path(os.getenv("SESSIONS_DIR", "./sessions"))
-SESSIONS_DIR.mkdir(exist_ok=True)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ── Session helpers ──────────────────────────────────────────────────────────
-
-def session_path(sid: str) -> Path:
-    p = SESSIONS_DIR / sid
-    p.mkdir(exist_ok=True)
-    return p
-
-
-def write_json(sid: str, name: str, data: dict):
-    (session_path(sid) / name).write_text(
-        json.dumps(data, indent=2, default=str), encoding="utf-8"
-    )
-
-
-def read_json(sid: str, name: str) -> dict | None:
-    p = session_path(sid) / name
-    if not p.exists():
-        return None
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def get_session_or_404(sid: str) -> Path:
-    p = SESSIONS_DIR / sid
-    if not p.exists():
-        raise HTTPException(404, f"Session {sid} not found")
-    return p
-
-
-# ── Audit ────────────────────────────────────────────────────────────────────
-
-class StartAuditRequest(BaseModel):
-    url: str
-
 
 # In-memory progress store (per session)
 _progress: dict[str, list[dict]] = {}
@@ -152,7 +124,7 @@ async def _run_audit_bg(session_id: str, url: str):
 
     try:
         report = await run_audit(url, session_id, progress_cb=on_progress)
-        write_json(session_id, "report.json", report.model_dump())
+        db_update_session(session_id, report=report.model_dump(), status="audited")
         events.append({"type": "complete", "session_id": session_id})
     except Exception as e:
         events.append({"type": "error", "message": str(e)})
@@ -161,37 +133,20 @@ async def _run_audit_bg(session_id: str, url: str):
 @app.get("/api/sessions")
 async def list_sessions(user_id: str = Depends(get_current_user)):
     """Return all sessions belonging to this user, newest first."""
-    sessions = []
-    for entry in SESSIONS_DIR.iterdir():
-        if not entry.is_dir():
-            continue
-        meta_file = entry / "meta.json"
-        if not meta_file.exists():
-            continue
-        meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        if meta.get("user_id") != user_id:
-            continue
-        # Derive a simple status label
-        plan_status = entry / "plan_status.json"
-        approved = entry / "approved_plan.json"
-        report = entry / "report.json"
-        if approved.exists():
-            label = "executing"
-        elif plan_status.exists():
-            ps = json.loads(plan_status.read_text())
-            label = "planning" if ps.get("status") == "generating" else "plan_ready"
-        elif report.exists():
-            label = "audited"
-        else:
-            label = "auditing"
-        sessions.append({
-            "session_id": entry.name,
-            "url": meta.get("url", ""),
-            "started_at": meta.get("started_at", ""),
-            "status": label,
-        })
-    sessions.sort(key=lambda s: s["started_at"], reverse=True)
-    return sessions
+    rows = db_get_user_sessions(user_id)
+    return [
+        {
+            "session_id": r["id"],
+            "url": r["url"],
+            "started_at": r["started_at"],
+            "status": r["status"],
+        }
+        for r in rows
+    ]
+
+
+class StartAuditRequest(BaseModel):
+    url: str
 
 
 @app.post("/api/audit/start")
@@ -201,14 +156,8 @@ async def start_audit(req: StartAuditRequest, user_id: str = Depends(get_current
         url = "https://" + url
 
     session_id = str(uuid.uuid4())[:8]
-    session_path(session_id)
-    write_json(session_id, "meta.json", {
-        "url": url,
-        "session_id": session_id,
-        "user_id": user_id,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "status": "auditing",
-    })
+    started_at = datetime.now(timezone.utc).isoformat()
+    db_create_session(session_id, user_id, url, started_at)
 
     _progress[session_id] = []
     task = asyncio.create_task(_run_audit_bg(session_id, url))
@@ -222,7 +171,7 @@ async def audit_stream(session_id: str, token: Optional[str] = None):
     # SSE: EventSource can't set headers, so accept token via query param
     if not token or not auth_module.decode_token(token):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    get_session_or_404(session_id)
+    _get_session_or_404(session_id)
 
     async def generate() -> AsyncGenerator[str, None]:
         sent = 0
@@ -244,8 +193,8 @@ async def audit_stream(session_id: str, token: Optional[str] = None):
 
 @app.get("/api/audit/{session_id}/report")
 async def get_report(session_id: str, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    report = read_json(session_id, "report.json")
+    session = _get_session_or_404(session_id)
+    report = session.get("report")
     if not report:
         raise HTTPException(202, "Audit still in progress")
     return report
@@ -260,30 +209,29 @@ async def _generate_plan_bg(session_id: str, report_data: dict):
     from models import AuditReport
     import traceback
     try:
-        write_json(session_id, "plan_status.json", {"status": "generating"})
+        db_update_session(session_id, plan_status={"status": "generating"}, status="planning")
         report = AuditReport(**report_data)
         print(f"[plan] Report loaded — {len(report.all_findings)} findings")
         plan = await generate_plan(report)
         if not plan.tasks:
-            write_json(session_id, "plan_status.json", {"status": "error", "message": "Claude returned no tasks"})
+            db_update_session(session_id, plan_status={"status": "error", "message": "Claude returned no tasks"})
             return
-        write_json(session_id, "plan.json", plan.model_dump())
-        write_json(session_id, "plan_status.json", {"status": "done"})
+        db_update_session(session_id, plan=plan.model_dump(), plan_status={"status": "done"}, status="plan_ready")
         print(f"[plan] Done — {len(plan.tasks)} tasks")
     except Exception as e:
         traceback.print_exc()
-        write_json(session_id, "plan_status.json", {"status": "error", "message": str(e)})
+        db_update_session(session_id, plan_status={"status": "error", "message": str(e)})
 
 
 @app.post("/api/plan/{session_id}/generate")
 async def generate_plan_endpoint(session_id: str, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    report_data = read_json(session_id, "report.json")
+    session = _get_session_or_404(session_id)
+    report_data = session.get("report")
     if not report_data:
         raise HTTPException(400, "Audit not complete — wait for audit to finish first")
 
-    status = read_json(session_id, "plan_status.json") or {}
-    if status.get("status") == "generating":
+    plan_status = session.get("plan_status") or {}
+    if plan_status.get("status") == "generating":
         return {"status": "generating"}
 
     task = asyncio.create_task(_generate_plan_bg(session_id, report_data))
@@ -293,13 +241,13 @@ async def generate_plan_endpoint(session_id: str, user_id: str = Depends(get_cur
 
 @app.get("/api/plan/{session_id}")
 async def get_plan(session_id: str, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    status = read_json(session_id, "plan_status.json") or {}
-    if status.get("status") == "generating":
+    session = _get_session_or_404(session_id)
+    plan_status = session.get("plan_status") or {}
+    if plan_status.get("status") == "generating":
         return {"status": "generating"}
-    if status.get("status") == "error":
-        raise HTTPException(500, status.get("message", "Plan generation failed"))
-    plan = read_json(session_id, "plan.json")
+    if plan_status.get("status") == "error":
+        raise HTTPException(500, plan_status.get("message", "Plan generation failed"))
+    plan = session.get("plan")
     if not plan:
         raise HTTPException(404, "Plan not generated yet — call /generate first")
     return plan
@@ -311,8 +259,8 @@ class ApprovePlanRequest(BaseModel):
 
 @app.post("/api/plan/{session_id}/approve")
 async def approve_plan(session_id: str, req: ApprovePlanRequest, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    plan = read_json(session_id, "plan.json")
+    session = _get_session_or_404(session_id)
+    plan = session.get("plan")
     if not plan:
         raise HTTPException(404, "No plan to approve")
 
@@ -321,8 +269,12 @@ async def approve_plan(session_id: str, req: ApprovePlanRequest, user_id: str = 
             task["status"] = "skipped"
 
     plan["approved_at"] = datetime.now(timezone.utc).isoformat()
-    write_json(session_id, "approved_plan.json", plan)
-    write_json(session_id, "task_log.json", {"tasks": [], "session_id": session_id})
+    db_update_session(
+        session_id,
+        approved_plan=plan,
+        task_log={"tasks": [], "session_id": session_id},
+        status="executing",
+    )
     return {"approved": True, "tasks": len(plan["tasks"])}
 
 
@@ -334,8 +286,8 @@ async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest, user_i
     Generate what the task WOULD do — current values + Claude suggestions — without touching anything.
     Frontend shows this for human review/editing before calling /task to apply.
     """
-    get_session_or_404(session_id)
-    plan_data = read_json(session_id, "approved_plan.json")
+    session = _get_session_or_404(session_id)
+    plan_data = session.get("approved_plan")
     if not plan_data:
         raise HTTPException(400, "Plan not approved")
 
@@ -375,8 +327,8 @@ async def manual_instructions(session_id: str, task_id: str, user_id: str = Depe
     Returns step-by-step manual instructions for a task so the user can
     do it themselves without providing credentials.
     """
-    get_session_or_404(session_id)
-    plan_data = read_json(session_id, "approved_plan.json")
+    session = _get_session_or_404(session_id)
+    plan_data = session.get("approved_plan")
     if not plan_data:
         raise HTTPException(400, "Plan not approved")
 
@@ -385,8 +337,7 @@ async def manual_instructions(session_id: str, task_id: str, user_id: str = Depe
         raise HTTPException(404, f"Task {task_id} not found")
 
     task = Task(**task_data)
-    meta = read_json(session_id, "meta.json") or {}
-    site_url = meta.get("url", "your site")
+    site_url = session.get("url", "your site")
 
     instructions = _build_manual_instructions(task, site_url)
     return {"task_id": task_id, "title": task.title, "instructions": instructions}
@@ -461,8 +412,8 @@ def _build_manual_instructions(task: Task, site_url: str) -> list[dict]:
 
 @app.post("/api/execute/{session_id}/task")
 async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    plan_data = read_json(session_id, "approved_plan.json")
+    session = _get_session_or_404(session_id)
+    plan_data = session.get("approved_plan")
     if not plan_data:
         raise HTTPException(400, "Plan not approved")
 
@@ -478,11 +429,12 @@ async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest, user_i
             if t["id"] == req.task_id:
                 t["status"] = "skipped"
                 break
-        write_json(session_id, "approved_plan.json", plan_data)
         result = TaskResult(task_id=req.task_id, status="skipped", action_taken="Skipped by user")
-        log = read_json(session_id, "task_log.json") or {"tasks": []}
+        # Re-fetch log to avoid race conditions
+        fresh = db_get_session(session_id) or {}
+        log = fresh.get("task_log") or {"tasks": []}
         log["tasks"].append(result.model_dump())
-        write_json(session_id, "task_log.json", log)
+        db_update_session(session_id, approved_plan=plan_data, task_log=log)
         return result.model_dump()
 
     needs_wp = task.platform_action.startswith("wp_")
@@ -511,21 +463,21 @@ async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest, user_i
         if t["id"] == req.task_id:
             t["status"] = result.status
             break
-    write_json(session_id, "approved_plan.json", plan_data)
 
-    # Append to task log
-    log = read_json(session_id, "task_log.json") or {"tasks": []}
+    # Re-fetch log to avoid race conditions
+    fresh = db_get_session(session_id) or {}
+    log = fresh.get("task_log") or {"tasks": []}
     log["tasks"].append(result.model_dump())
-    write_json(session_id, "task_log.json", log)
+    db_update_session(session_id, approved_plan=plan_data, task_log=log)
 
     return result.model_dump()
 
 
 @app.get("/api/execute/{session_id}/status")
 async def execution_status(session_id: str, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    plan = read_json(session_id, "approved_plan.json")
-    log = read_json(session_id, "task_log.json") or {"tasks": []}
+    session = _get_session_or_404(session_id)
+    plan = session.get("approved_plan")
+    log = session.get("task_log") or {"tasks": []}
     if not plan:
         raise HTTPException(400, "Plan not approved")
 
@@ -552,5 +504,5 @@ async def execution_status(session_id: str, user_id: str = Depends(get_current_u
 
 @app.get("/api/session/{session_id}")
 async def get_session(session_id: str, user_id: str = Depends(get_current_user)):
-    get_session_or_404(session_id)
-    return read_json(session_id, "meta.json")
+    session = _get_session_or_404(session_id)
+    return {"url": session["url"], "session_id": session["id"], "started_at": session["started_at"], "status": session["status"]}
