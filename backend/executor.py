@@ -16,6 +16,7 @@ Never touches theme files, plugins, users, or other posts.
 import re
 import json
 import time
+import base64
 import requests
 import anthropic
 from urllib.parse import urlparse
@@ -133,8 +134,14 @@ Rules:
 
 def _session(url: str, username: str, password: str) -> tuple[requests.Session, str]:
     s = requests.Session()
-    s.auth = (username, password)
-    s.headers.update({"Content-Type": "application/json", "User-Agent": "SEOAgent/1.0"})
+    # Set Authorization as a permanent header so it persists through redirects
+    # (http→https or non-www→www). session.auth is stripped on redirect by requests.
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    s.headers.update({
+        "Authorization": f"Basic {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "SEOAgent/1.0",
+    })
     api = url.rstrip("/") + "/wp-json/wp/v2"
     return s, api
 
