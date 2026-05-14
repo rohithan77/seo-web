@@ -502,12 +502,12 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
   }
 
   // ── Auto-run loop ────────────────────────────────────────────────────────
-  async function runTaskList(taskIds: string[], addLog: (m: string) => void) {
+  async function runTaskList(taskIds: string[], addLog: (m: string) => void, allowStatuses = ["pending"]) {
     for (const taskId of taskIds) {
       if (stopRef.current) break;
       const current = await refresh();
       const task = current?.tasks.find((t) => t.id === taskId);
-      if (!task || task.status !== "pending") continue;
+      if (!task || !allowStatuses.includes(task.status)) continue;
 
       addLog(`Previewing: ${task.title}`);
       const needsWp = NEEDS_WP(task.platform_action);
@@ -904,7 +904,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
                 const addLog = (m: string) => setAutoLog((p) => [...p, m]);
                 const current = await refresh();
                 const failedIds = (current?.tasks ?? []).filter((t) => t.status === "failed").map((t) => t.id);
-                await runTaskList(failedIds, addLog);
+                await runTaskList(failedIds, addLog, ["failed"]);
               }}
               disabled={!!runningTaskId}
               className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors shrink-0"
