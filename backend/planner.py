@@ -23,7 +23,7 @@ PRIORITY RULES (strictly follow):
 - Week 2: On-page optimisation (meta, canonical, schema, headings) for all key pages
 - Week 3: Content improvements (rewrites, new content, internal links)
 - Week 4: Off-page and AI visibility (backlinks, llms.txt, outreach)
-- Max 40 tasks total
+- Max 25 tasks total — quality over quantity, pick the highest-value ones
 - priority_score = impact × (10 - effort)
 - platform_action must be one of:
   wp_update_meta, wp_update_content, wp_add_schema, wp_update_sitemap,
@@ -53,6 +53,14 @@ Return ONLY a JSON array of tasks. Each task:
 }"""
 
 
+def _valid_task_json(s: str) -> bool:
+    try:
+        d = json.loads(s)
+        return isinstance(d, dict) and "title" in d
+    except Exception:
+        return False
+
+
 async def generate_plan(report: AuditReport) -> Plan:
     client = anthropic.AsyncAnthropic()
 
@@ -77,8 +85,8 @@ async def generate_plan(report: AuditReport) -> Plan:
     print(f"[planner] Generating plan for {report.url} with {len(findings_summary)} findings")
 
     msg = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=8192,
+        model="claude-haiku-4-5-20251001",
+        max_tokens=6000,
         system=PLAN_SYSTEM,
         messages=[{
             "role": "user",
@@ -91,8 +99,8 @@ CRITICAL REQUIREMENT: Week 1 MUST start with:
 2. Google Business Profile task (action: geo_update_ai_meta)
 Then technical fixes based on the findings below.
 
-All findings from the audit ({len(findings_summary)} total):
-{json.dumps(findings_summary[:30], indent=2, default=str)}
+All findings from the audit ({len(findings_summary)} total, showing top {min(len(findings_summary), 20)} by impact):
+{json.dumps(findings_summary[:20], indent=2, default=str)}
 
 Study the findings carefully. Make every task description specific to what was found on {report.url}.
 Return the task plan as a JSON array only — no explanation, no markdown."""
@@ -101,7 +109,7 @@ Return the task plan as a JSON array only — no explanation, no markdown."""
     print(f"[planner] Claude responded, parsing tasks...")
 
     text = msg.content[0].text.strip()
-    m = re.search(r'\[[\s\S]*\]', text)
+    m = re.search(r'\[[\s\S]*', text)
     if not m:
         return Plan(
             session_id=report.session_id,
@@ -111,7 +119,14 @@ Return the task plan as a JSON array only — no explanation, no markdown."""
             tasks=[],
         )
 
-    raw_tasks = json.loads(m.group(0))
+    json_text = m.group(0)
+    # Try clean parse first; if truncated, salvage complete objects before the cut
+    try:
+        raw_tasks = json.loads(json_text if json_text.rstrip().endswith("]") else json_text + "]")
+    except json.JSONDecodeError:
+        # Extract every complete {...} block
+        raw_tasks = re.findall(r'\{[^{}]*\}', json_text)
+        raw_tasks = [json.loads(t) for t in raw_tasks if _valid_task_json(t)]
     print(f"[planner] Parsed {len(raw_tasks)} raw tasks from Claude")
     tasks = []
     for i, t in enumerate(raw_tasks):
