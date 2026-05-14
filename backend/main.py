@@ -280,6 +280,12 @@ async def approve_plan(session_id: str, req: ApprovePlanRequest, user_id: str = 
 
 # ── Execute ──────────────────────────────────────────────────────────────────
 
+def _norm_wp_url(url: str) -> str:
+    if url and not url.startswith("http"):
+        return "https://" + url
+    return url
+
+
 @app.post("/api/execute/{session_id}/preview")
 async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest, user_id: str = Depends(get_current_user)):
     """
@@ -297,8 +303,9 @@ async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest, user_i
 
     task = Task(**task_data)
     needs_wp = task.platform_action.startswith("wp_")
+    wp_url = _norm_wp_url(req.wp_url or "")
 
-    if needs_wp and not (req.wp_url and req.wp_username and req.wp_app_password):
+    if needs_wp and not (wp_url and req.wp_username and req.wp_app_password):
         from models import TaskPreview
         return TaskPreview(
             task_id=req.task_id,
@@ -314,7 +321,7 @@ async def preview_task_endpoint(session_id: str, req: PreviewTaskRequest, user_i
         None,
         preview_task,
         task,
-        req.wp_url or "",
+        wp_url,
         req.wp_username or "",
         req.wp_app_password or "",
     )
@@ -438,8 +445,9 @@ async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest, user_i
         return result.model_dump()
 
     needs_wp = task.platform_action.startswith("wp_")
+    wp_url = _norm_wp_url(req.wp_url or "")
 
-    if needs_wp and not (req.wp_url and req.wp_username and req.wp_app_password):
+    if needs_wp and not (wp_url and req.wp_username and req.wp_app_password):
         return {
             "needs_credentials": True,
             "task_id": req.task_id,
@@ -451,7 +459,7 @@ async def execute_task_endpoint(session_id: str, req: ExecuteTaskRequest, user_i
         None,
         lambda: execute_task(
             task,
-            wp_url=req.wp_url or "",
+            wp_url=wp_url,
             wp_username=req.wp_username or "",
             wp_app_password=req.wp_app_password or "",
             approved_content=req.approved_content,

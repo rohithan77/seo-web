@@ -352,7 +352,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
   useEffect(() => { refresh(); }, [id]);
 
   // ── Fetch preview for a task ─────────────────────────────────────────────
-  async function fetchPreview(taskId: string, wpCreds?: WPCreds): Promise<Preview> {
+  async function fetchPreview(taskId: string, wpCreds?: WPCreds): Promise<Preview | null> {
     setPreviewLoading(true);
     setPreviewTaskId(taskId);
     setPreview(null);
@@ -368,8 +368,16 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
       body: JSON.stringify(body),
     });
     const data = await res.json();
-    setPreview(data);
     setPreviewLoading(false);
+    if (!res.ok) {
+      // Show creds form again with error so user can correct and retry
+      const msg = data?.detail || "Preview failed — check your WordPress URL and credentials.";
+      setCredsError(msg);
+      setPreviewTaskId(null);
+      setShowCredsFor(taskId);
+      return null;
+    }
+    setPreview(data);
     return data;
   }
 
@@ -431,6 +439,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
     }
 
     const p = await fetchPreview(taskId, wpCreds || undefined);
+    if (!p) return; // error shown in creds form
     if (p.needs_credentials) {
       setShowCredsFor(taskId);
       return;
@@ -465,7 +474,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
       }
 
       const p = await fetchPreview(taskId, wpCreds || undefined);
-      if (p.needs_credentials) {
+      if (!p || p.needs_credentials) {
         setAutoRunning(false);
         setShowCredsFor(taskId);
         addLog(`Paused — WordPress credentials needed for: ${task.title}`);
