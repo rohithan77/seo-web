@@ -152,69 +152,75 @@ def _detect_plugin(session: requests.Session, site_url: str) -> str:
     return "none"
 
 
+def _get_all_pages(session: requests.Session, api: str) -> list[dict]:
+    """Fetch all published pages, handling pagination."""
+    results = []
+    for endpoint in ("pages", "posts"):
+        try:
+            r = session.get(f"{api}/{endpoint}",
+                            params={"per_page": 100, "status": "publish"}, timeout=15)
+            data = r.json()
+            if isinstance(data, list):
+                results.extend(data)
+                print(f"[find_post] Got {len(data)} {endpoint} from API")
+                for item in data:
+                    print(f"[find_post]   id={item.get('id')} slug={item.get('slug')!r} link={item.get('link')!r}")
+            else:
+                print(f"[find_post] {endpoint} API returned non-list: {str(data)[:200]}")
+        except Exception as e:
+            print(f"[find_post] {endpoint} API error: {e}")
+    return results
+
+
 def _find_post(session: requests.Session, api: str, target_url: str) -> tuple[int | None, str]:
     """Return (post_id, endpoint) by matching slug or link. Tries pages then posts."""
     parsed = urlparse(target_url)
     path = parsed.path.strip("/")
     slug = path.split("/")[-1] if path else ""
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    target_clean = target_url.rstrip("/")
 
-    # Homepage: no path slug — try several strategies
+    print(f"[find_post] target={target_url!r} slug={slug!r}")
+
+    # ── Slug-based search (works for inner pages) ─────────────────────────────
+    if slug:
+        for endpoint in ("pages", "posts"):
+            try:
+                r = session.get(f"{api}/{endpoint}",
+                                params={"slug": slug, "per_page": 1}, timeout=10)
+                items = r.json()
+                if isinstance(items, list) and items:
+                    print(f"[find_post] Slug match: id={items[0]['id']}")
+                    return items[0]["id"], endpoint
+            except Exception:
+                continue
+
+    # ── Homepage or slug not found — scan all pages ───────────────────────────
+    all_items = _get_all_pages(session, api)
+
+    # 1. Exact link match
+    for item in all_items:
+        link = item.get("link", "").rstrip("/")
+        if link == target_clean or link == base:
+            print(f"[find_post] Link match: id={item['id']} link={item.get('link')!r}")
+            return item["id"], "pages" if item.get("type") != "post" else "posts"
+
+    # 2. For homepage: try common slugs
     if not slug:
-        base = f"{parsed.scheme}://{parsed.netloc}"
+        for home_slug in ("home", "homepage", "front-page", "frontpage", "index", "main"):
+            for item in all_items:
+                if item.get("slug") == home_slug:
+                    print(f"[find_post] Home slug match: id={item['id']} slug={home_slug!r}")
+                    return item["id"], "pages"
 
-        # Strategy 1: common homepage slugs
-        for home_slug in ("home", "homepage", "front-page", "frontpage"):
-            for endpoint in ("pages", "posts"):
-                try:
-                    r = session.get(f"{api}/{endpoint}",
-                                    params={"slug": home_slug, "per_page": 1}, timeout=10)
-                    items = r.json()
-                    if isinstance(items, list) and items:
-                        return items[0]["id"], endpoint
-                except Exception:
-                    continue
+    # 3. Last resort for homepage: use lowest-ID page
+    if not slug and all_items:
+        pages_only = [p for p in all_items if p.get("type") != "post"] or all_items
+        pages_only.sort(key=lambda p: p.get("id", 9999))
+        print(f"[find_post] Fallback to first page: id={pages_only[0]['id']} slug={pages_only[0].get('slug')!r}")
+        return pages_only[0]["id"], "pages"
 
-        # Strategy 2: scan pages and find the one whose link matches the base URL
-        try:
-            r = session.get(f"{api}/pages", params={"per_page": 100, "orderby": "menu_order"}, timeout=15)
-            pages = r.json()
-            if isinstance(pages, list):
-                for page in pages:
-                    link = page.get("link", "").rstrip("/")
-                    if link == base or link == base + "/":
-                        return page["id"], "pages"
-                # Fall back: return the page with the lowest ID (likely the first page created)
-                if pages:
-                    pages_sorted = sorted(pages, key=lambda p: p.get("id", 9999))
-                    return pages_sorted[0]["id"], "pages"
-        except Exception:
-            pass
-
-        return None, "pages"
-
-    # Inner page: slug-based search
-    for endpoint in ("pages", "posts"):
-        try:
-            r = session.get(f"{api}/{endpoint}",
-                            params={"slug": slug, "per_page": 1}, timeout=10)
-            items = r.json()
-            if isinstance(items, list) and items:
-                return items[0]["id"], endpoint
-        except Exception:
-            continue
-
-    # Last resort: scan pages for matching link
-    try:
-        r = session.get(f"{api}/pages", params={"per_page": 100}, timeout=15)
-        pages = r.json()
-        if isinstance(pages, list):
-            target_clean = target_url.rstrip("/")
-            for page in pages:
-                if page.get("link", "").rstrip("/") == target_clean:
-                    return page["id"], "pages"
-    except Exception:
-        pass
-
+    print(f"[find_post] No match found for {target_url!r}")
     return None, "posts"
 
 
