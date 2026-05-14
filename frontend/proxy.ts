@@ -20,6 +20,6 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Exclude Next.js internals and static assets
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Exclude Next.js internals, static assets, and API routes (backend handles its own auth)
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
 };
