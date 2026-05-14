@@ -68,7 +68,7 @@ function PreviewPanel({
     if (typeof s.h1_title === "string") flat.h1_title = s.h1_title;
     setEdited(flat);
     if (Array.isArray(s.images)) {
-      setEditedImages(s.images.map((img: { id: number; suggested_alt: string }) => ({
+      setEditedImages((s.images as Array<{ id: number; suggested_alt: string }>).map((img) => ({
         id: img.id,
         suggested_alt: img.suggested_alt,
       })));
