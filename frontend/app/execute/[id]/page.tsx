@@ -622,6 +622,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
   const allDone = status.pending === 0;
   const nextTask = status.next_task;
   const skippedTasks = status.tasks.filter((t) => t.status === "skipped");
+  const failedTasks = status.tasks.filter((t) => t.status === "failed");
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
@@ -857,6 +858,12 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
                     <CheckCircle size={11} /> Done
                   </span>
                 )}
+                {isFailed && !autoRunning && (
+                  <button onClick={() => handleRunTask(task.id)} disabled={!!runningTaskId}
+                    className="text-xs text-red-500 hover:text-red-700 underline underline-offset-2 transition-colors">
+                    Retry
+                  </button>
+                )}
                 {isFailed && (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded-full">
                     <XCircle size={11} /> Failed
@@ -876,6 +883,37 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
           );
         })}
       </div>
+
+      {/* Failed tasks retry banner */}
+      {failedTasks.length > 0 && !autoRunning && (
+        <div className="mt-8 bg-red-50 border border-red-100 rounded-xl p-6">
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div>
+              <h3 className="font-semibold text-slate-900 mb-1">
+                {failedTasks.length} task{failedTasks.length !== 1 ? "s" : ""} failed
+              </h3>
+              <p className="text-sm text-slate-500">
+                Click Retry on each task above, or use the button to retry them all in sequence.
+              </p>
+            </div>
+            <button
+              onClick={async () => {
+                stopRef.current = false;
+                setAutoRunning(true);
+                setAutoLog(["Retrying failed tasks…"]);
+                const addLog = (m: string) => setAutoLog((p) => [...p, m]);
+                const current = await refresh();
+                const failedIds = (current?.tasks ?? []).filter((t) => t.status === "failed").map((t) => t.id);
+                await runTaskList(failedIds, addLog);
+              }}
+              disabled={!!runningTaskId}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors shrink-0"
+            >
+              <Play size={14} /> Retry all failed
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Skipped tasks banner + done state */}
       {allDone && (
