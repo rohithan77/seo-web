@@ -429,7 +429,7 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
   }
 
   // ── Execute with approved content ────────────────────────────────────────
-  async function applyTask(taskId: string, wpCreds: WPCreds | undefined, approvedContent: Record<string, unknown>): Promise<"ok" | "failed"> {
+  async function applyTask(taskId: string, wpCreds: WPCreds | undefined, approvedContent: Record<string, unknown>): Promise<{ status: "ok" | "failed"; error?: string }> {
     setRunningTaskId(taskId);
     const body: Record<string, unknown> = { task_id: taskId, approved_content: approvedContent };
     if (wpCreds) {
@@ -446,10 +446,11 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
       const data = await res.json();
       setRunningTaskId(null);
       await refresh();
-      return data.status === "completed" ? "ok" : "failed";
-    } catch {
+      if (data.status === "completed") return { status: "ok" };
+      return { status: "failed", error: data.error || data.detail || "Unknown error" };
+    } catch (e) {
       setRunningTaskId(null);
-      return "failed";
+      return { status: "failed", error: String(e) };
     }
   }
 
@@ -497,7 +498,10 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
       setPreviewTaskId(null);
       setPreview(null);
       setPendingApprove(null);
-      await applyTask(taskId, wpCreds || undefined, approvedContent);
+      const r = await applyTask(taskId, wpCreds || undefined, approvedContent);
+      if (r.status === "failed" && r.error) {
+        setAutoLog((p) => [...p, `✗ Error: ${r.error}`]);
+      }
     });
   }
 
@@ -539,7 +543,12 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
           setPendingApprove(null);
           addLog(`Applying: ${task.title}`);
           const result = await applyTask(taskId, wpCreds || undefined, approvedContent);
-          addLog(result === "ok" ? `✓ Done: ${task.title}` : `✗ Failed: ${task.title}`);
+          if (result.status === "ok") {
+            addLog(`✓ Done: ${task.title}`);
+          } else {
+            addLog(`✗ Failed: ${task.title}`);
+            if (result.error) addLog(`  Reason: ${result.error}`);
+          }
           resolve();
           // Resume auto-run for remaining tasks
           const remaining = taskIds.slice(taskIds.indexOf(taskId) + 1);
@@ -831,7 +840,11 @@ export default function ExecutePage({ params }: { params: Promise<{ id: string }
                   </span>
                 </div>
                 {logEntry?.action_taken && <p className="text-xs text-green-700 mt-0.5">{logEntry.action_taken}</p>}
-                {logEntry?.error && <p className="text-xs text-red-500 mt-0.5">{logEntry.error}</p>}
+                {logEntry?.error && (
+                  <div className="mt-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700">
+                    <span className="font-semibold">Why it failed: </span>{logEntry.error}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 {isPending && !isRunning && !autoRunning && (
