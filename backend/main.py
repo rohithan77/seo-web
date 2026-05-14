@@ -352,6 +352,7 @@ async def manual_instructions(session_id: str, task_id: str, user_id: str = Depe
 
 def _build_manual_instructions(task: Task, site_url: str) -> list[dict]:
     """Return a list of {step, detail} dicts describing how to do this task manually."""
+    from executor import _manual_steps_for_action
     action = task.platform_action
     target = task.target_url or site_url
 
@@ -383,7 +384,7 @@ def _build_manual_instructions(task: Task, site_url: str) -> list[dict]:
         return [
             {"step": "Go to Media Library", "detail": "In WordPress admin: Media → Library. Switch to List View for easier editing."},
             {"step": "Find images with no alt text", "detail": "Sort by 'uploaded to' to filter images for this specific page. Click each image."},
-            {"step": "Fill in the Alternative Text field", "detail": "Describe what the image shows in 5–12 words. Include a keyword naturally if it fits. E.g. 'Team of nurses reviewing patient charts'"},
+            {"step": "Fill in the Alternative Text field", "detail": "Describe what the image shows in 5–12 words. Include a keyword naturally if it fits."},
             {"step": "Save each image", "detail": "Click Update for each image. This improves both SEO and accessibility."},
         ]
     elif action == "wp_update_sitemap":
@@ -393,28 +394,8 @@ def _build_manual_instructions(task: Task, site_url: str) -> list[dict]:
             {"step": "Submit to Bing Webmaster Tools", "detail": "Go to bing.com/webmasters → your site → Sitemaps → Submit sitemap URL."},
             {"step": "Ping manually (optional)", "detail": f"Visit this URL in your browser: https://www.google.com/ping?sitemap={site_url.rstrip('/')}/sitemap.xml"},
         ]
-    elif action == "content_write":
-        return [
-            {"step": "Identify the target keyword", "detail": f"Based on the plan: {task.description}"},
-            {"step": "Research the topic", "detail": "Look at the top 3–5 Google results for your target keyword. Note what headings they use and what questions they answer."},
-            {"step": "Write the content", "detail": "Aim for at least 800 words. Use H2 and H3 headings. Answer the searcher's question directly in the first paragraph."},
-            {"step": "Optimise before publishing", "detail": "Include your keyword in: the title, first 100 words, at least one H2, and the meta description."},
-            {"step": "Add internal links", "detail": "Link to 2–3 other relevant pages on your site. This passes authority and helps Google understand your site structure."},
-        ]
-    elif action in ("geo_create_llms_txt", "geo_update_ai_meta"):
-        return [
-            {"step": "Create /llms.txt on your server", "detail": f"Via FTP or your hosting file manager, create a file at: {site_url.rstrip('/')}/llms.txt"},
-            {"step": "Add your site description", "detail": "Write 2–3 sentences describing what your site is about, who it's for, and what topics it covers. This helps AI assistants like ChatGPT and Claude understand your content."},
-            {"step": "List your key pages", "detail": "Add a section listing your most important pages with their URLs and a one-line description of each."},
-            {"step": "Add Organization schema to your homepage", "detail": "In your SEO plugin, go to your homepage → Schema → Organization. Fill in: name, URL, logo, description, social profiles."},
-        ]
     else:
-        return [
-            {"step": "Review the task", "detail": task.description},
-            {"step": "Log into your WordPress admin", "detail": f"Go to {site_url.rstrip('/')}/wp-admin"},
-            {"step": "Make the change manually", "detail": f"Action required: {action.replace('_', ' ')}"},
-            {"step": "Verify the change", "detail": "After making the change, view your page and confirm it looks correct."},
-        ]
+        return _manual_steps_for_action(action, task, target)
 
 
 @app.post("/api/execute/{session_id}/task")

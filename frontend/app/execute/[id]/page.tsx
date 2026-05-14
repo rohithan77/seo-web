@@ -19,10 +19,12 @@ type ExecStatus = {
 
 type WPCreds = { url: string; username: string; password: string };
 
+type PreviewStep = { step: string; detail: string };
+
 type Preview = {
   task_id: string; action: string; target_url: string; summary: string;
   current: Record<string, string>;
-  suggested: Record<string, string | object>;
+  suggested: Record<string, string | object | PreviewStep[]>;
   needs_credentials: boolean;
 };
 
@@ -63,6 +65,7 @@ function PreviewPanel({
     if (typeof s.canonical === "string") flat.canonical = s.canonical;
     if (typeof s.schema_json === "string") flat.schema_json = s.schema_json;
     if (typeof s.schema_type === "string") flat.schema_type = s.schema_type;
+    if (typeof s.h1_title === "string") flat.h1_title = s.h1_title;
     setEdited(flat);
     if (Array.isArray(s.images)) {
       setEditedImages(s.images.map((img: { id: number; suggested_alt: string }) => ({
@@ -150,6 +153,30 @@ function PreviewPanel({
         </div>
       )}
 
+      {/* H1 title */}
+      {edited.h1_title !== undefined && (
+        <div className="space-y-4 mb-5">
+          {(preview.suggested as Record<string, unknown>).current_h1 && (
+            <div className="bg-slate-50 rounded-lg p-3 text-xs">
+              <div className="font-medium text-slate-500 mb-1">Current H1</div>
+              <div className="text-slate-700">{String((preview.suggested as Record<string, unknown>).current_h1)}</div>
+            </div>
+          )}
+          <div>
+            <label className="text-xs font-medium text-slate-700 block mb-1">
+              New H1 heading <span className="text-slate-400 font-normal">({edited.h1_title?.length ?? 0} chars)</span>
+            </label>
+            <input
+              type="text"
+              value={edited.h1_title ?? ""}
+              onChange={(e) => setEdited((p) => ({ ...p, h1_title: e.target.value }))}
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            />
+            <p className="text-xs text-slate-400 mt-1">This updates the page title (H1) directly in WordPress.</p>
+          </div>
+        </div>
+      )}
+
       {/* Schema JSON */}
       {edited.schema_json !== undefined && (
         <div className="mb-5">
@@ -207,7 +234,7 @@ function PreviewPanel({
       )}
 
       {/* Sitemap/non-editable tasks */}
-      {preview.suggested.action && !edited.meta_title && !edited.schema_json && !edited.canonical && editedImages.length === 0 && (
+      {preview.suggested.action && !edited.meta_title && !edited.schema_json && !edited.canonical && editedImages.length === 0 && !(preview.suggested as Record<string, unknown>).steps && (
         <div className="bg-indigo-50 rounded-lg p-4 mb-5 text-sm text-indigo-800">
           {String(preview.suggested.action)}
           {preview.suggested.sitemap_url && (
@@ -216,8 +243,28 @@ function PreviewPanel({
         </div>
       )}
 
-      {/* Note for non-WP tasks */}
-      {preview.suggested.note && (
+      {/* Step-by-step guide for non-WP tasks */}
+      {Array.isArray((preview.suggested as Record<string, unknown>).steps) && (
+        <div className="mb-5">
+          <div className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wide">How to complete this task</div>
+          <ol className="space-y-3">
+            {((preview.suggested as Record<string, unknown>).steps as Array<{step: string; detail: string}>).map((s, i) => (
+              <li key={i} className="flex gap-3">
+                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center justify-center mt-0.5">
+                  {i + 1}
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-slate-800">{s.step}</div>
+                  <div className="text-xs text-slate-500 mt-0.5 whitespace-pre-line">{s.detail}</div>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {/* Note for non-WP tasks (only if no steps) */}
+      {preview.suggested.note && !(preview.suggested as Record<string, unknown>).steps && (
         <div className="bg-amber-50 border border-amber-100 rounded-lg p-4 mb-5 text-sm text-amber-800">
           {String(preview.suggested.note)}
         </div>
