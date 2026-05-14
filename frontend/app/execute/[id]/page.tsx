@@ -84,7 +84,10 @@ function PreviewPanel({
     );
   }
 
+  const isStepBased = Array.isArray((preview?.suggested as Record<string, unknown>)?.steps);
+
   const buildApproved = () => {
+    if (isStepBased) return { manual: true };
     const out: Record<string, unknown> = { ...edited };
     if (editedImages.length) out.images = editedImages;
     return out;
@@ -243,10 +246,18 @@ function PreviewPanel({
         </div>
       )}
 
-      {/* Step-by-step guide for non-WP tasks */}
+      {/* Impact brief — shown when steps are present */}
+      {isStepBased && (preview.suggested as Record<string, unknown>).impact && (
+        <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-4 mb-5">
+          <div className="text-xs font-semibold text-indigo-600 uppercase tracking-wide mb-1">Why this matters</div>
+          <p className="text-sm text-indigo-900 whitespace-pre-line">{String((preview.suggested as Record<string, unknown>).impact)}</p>
+        </div>
+      )}
+
+      {/* Step-by-step guide */}
       {Array.isArray((preview.suggested as Record<string, unknown>).steps) && (
         <div className="mb-5">
-          <div className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wide">How to complete this task</div>
+          <div className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wide">Where to make this change — step by step</div>
           <ol className="space-y-3">
             {((preview.suggested as Record<string, unknown>).steps as Array<{step: string; detail: string}>).map((s, i) => (
               <li key={i} className="flex gap-3">
@@ -278,14 +289,16 @@ function PreviewPanel({
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
         >
           {loading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-          Looks good — apply it
+          {isStepBased ? "Mark as Done" : "Looks good — apply it"}
         </button>
-        <button
-          onClick={onManual}
-          className="flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 hover:text-slate-800 text-sm rounded-lg transition-colors"
-        >
-          <BookOpen size={14} /> I&apos;ll do it myself
-        </button>
+        {!isStepBased && (
+          <button
+            onClick={onManual}
+            className="flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 hover:text-slate-800 text-sm rounded-lg transition-colors"
+          >
+            <BookOpen size={14} /> I&apos;ll do it myself
+          </button>
+        )}
         <button
           onClick={onCancel}
           className="text-sm text-slate-400 hover:text-slate-600 transition-colors"

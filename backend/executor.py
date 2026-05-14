@@ -166,17 +166,37 @@ def _get_all_pages(session: requests.Session, api: str) -> list[dict]:
         try:
             r = session.get(f"{api}/{endpoint}",
                             params={"per_page": 100, "status": "publish"}, timeout=15)
+            print(f"[find_post] {endpoint} status={r.status_code} body={r.text[:300]!r}")
             data = r.json()
             if isinstance(data, list):
                 results.extend(data)
-                print(f"[find_post] Got {len(data)} {endpoint} from API")
+                print(f"[find_post] Got {len(data)} {endpoint}")
                 for item in data:
                     print(f"[find_post]   id={item.get('id')} slug={item.get('slug')!r} link={item.get('link')!r}")
             else:
-                print(f"[find_post] {endpoint} API returned non-list: {str(data)[:200]}")
+                print(f"[find_post] {endpoint} returned non-list: {str(data)[:200]}")
         except Exception as e:
             print(f"[find_post] {endpoint} API error: {e}")
     return results
+
+
+def _find_page_by_id_scan(session: requests.Session, api: str, base_url: str) -> tuple[int | None, str]:
+    """Try fetching page IDs 1-50 directly to find the homepage."""
+    base = base_url.rstrip("/")
+    for pid in range(1, 51):
+        for endpoint in ("pages", "posts"):
+            try:
+                r = session.get(f"{api}/{endpoint}/{pid}", timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    link = data.get("link", "").rstrip("/")
+                    print(f"[find_post] id={pid} endpoint={endpoint} link={link!r}")
+                    if link == base:
+                        print(f"[find_post] ID scan found homepage: id={pid}")
+                        return pid, endpoint
+            except Exception:
+                continue
+    return None, "pages"
 
 
 def _find_post(session: requests.Session, api: str, target_url: str) -> tuple[int | None, str]:
@@ -364,6 +384,142 @@ def _verify_live(public_url: str, check: str, expected: str, retries: int = 3) -
 
 # ── Manual step guides for non-WP tasks ──────────────────────────────────────
 
+def _wp_admin_steps(
+    action: str, task: Task, target_url: str,
+    plugin: str, wp_url: str, page_name: str,
+    page_id: int | None, generated: dict,
+) -> tuple[list[dict], str, str]:
+    """
+    Returns (steps, summary, impact) for a WP task.
+    Steps contain exact WP Admin navigation + content to copy-paste.
+    Impact is a 2-line description of what the change achieves.
+    """
+    admin = wp_url.rstrip("/") + "/wp-admin"
+
+    if page_id:
+        edit_link = f"{admin}/post.php?post={page_id}&action=edit"
+        nav_detail = f"Open this URL directly:\n{edit_link}\n\n(Or: Pages → All Pages → find '{page_name or 'your page'}' → click Edit)"
+    else:
+        nav_detail = f"Go to: Pages → All Pages → find '{page_name or 'your page'}' → click Edit"
+
+    login_step = {"step": "Log in to WordPress Admin", "detail": f"Go to {admin} and sign in with your admin account."}
+    open_step = {"step": "Open the page editor", "detail": nav_detail}
+    save_step = {"step": "Save your changes", "detail": "Click the blue 'Update' button (top-right of the editor) to publish."}
+
+    if action == "wp_update_meta":
+        meta_title = generated.get("meta_title", "")
+        meta_desc = generated.get("meta_description", "")
+        if plugin == "yoast":
+            panel = [
+                {"step": "Open Yoast SEO panel", "detail": "Scroll to the bottom of the editor page — find the 'Yoast SEO' box. Click the 'SEO' tab (first tab)."},
+                {"step": "Paste the SEO title", "detail": f"Click the 'SEO title' field → select all (Ctrl+A) → paste:\n\n{meta_title}"},
+                {"step": "Paste the meta description", "detail": f"Click the 'Meta description' field → select all → paste:\n\n{meta_desc}"},
+            ]
+        elif plugin == "rankmath":
+            panel = [
+                {"step": "Open Rank Math panel", "detail": "Click the Rank Math icon in the top editor toolbar (bar-chart icon). The panel opens on the right."},
+                {"step": "Paste the SEO title", "detail": f"In the 'Title' field → select all → paste:\n\n{meta_title}"},
+                {"step": "Paste the meta description", "detail": f"In the 'Description' field → select all → paste:\n\n{meta_desc}"},
+            ]
+        else:
+            panel = [
+                {"step": "Update the page title", "detail": f"In the title field at the top of the editor, set it to:\n\n{meta_title}"},
+                {"step": "Update the excerpt (used as meta description)", "detail": f"Right sidebar → 'Excerpt' panel → enter:\n\n{meta_desc}"},
+                {"step": "Tip: install Yoast SEO", "detail": "For a proper meta description field, install Yoast SEO: Plugins → Add New → search 'Yoast SEO' → Install & Activate."},
+            ]
+        steps = [login_step, open_step, *panel, save_step]
+        impact = "Meta title and description are the clickable snippet Google shows in search results — they determine whether users click your result.\nImproving them from generic to keyword-specific can double organic click-through rate."
+        summary = f"Update meta title and description on {target_url}"
+
+    elif action == "wp_update_content":
+        new_h1 = generated.get("h1_title", "")
+        current_h1 = generated.get("current_h1", "")
+        current_note = f"\n\n(Current H1: {current_h1})" if current_h1 else ""
+        steps = [
+            login_step,
+            open_step,
+            {"step": "Find the H1 heading block", "detail": "Click on the large heading text at the very top of the editor content area (before any body paragraphs). This is your H1."},
+            {"step": "Replace the heading text", "detail": f"Select all text in the heading block and type:\n\n{new_h1}{current_note}"},
+            save_step,
+        ]
+        impact = "The H1 is the strongest on-page SEO signal — it tells Google exactly what topic this page covers.\nA keyword-rich H1 matching search intent is correlated with 1-3 position ranking improvements."
+        summary = f"Update H1 heading on {target_url}"
+
+    elif action == "wp_set_canonical":
+        canonical_url = generated.get("canonical", target_url)
+        if plugin == "yoast":
+            canon_steps = [
+                {"step": "Open Yoast Advanced tab", "detail": "In the Yoast SEO box → click 'Advanced' tab (gear icon, usually third tab)."},
+                {"step": "Set the canonical URL", "detail": f"In the 'Canonical URL' field, paste:\n\n{canonical_url}"},
+            ]
+        elif plugin == "rankmath":
+            canon_steps = [
+                {"step": "Open Rank Math Advanced tab", "detail": "In the Rank Math panel → click 'Advanced' tab."},
+                {"step": "Set the canonical URL", "detail": f"In 'Canonical URL', paste:\n\n{canonical_url}"},
+            ]
+        else:
+            canon_steps = [
+                {"step": "Add canonical via plugin", "detail": f"Without an SEO plugin, install Yoast SEO (free) to get a canonical URL field. Then enter:\n\n{canonical_url}"},
+            ]
+        steps = [login_step, open_step, *canon_steps, save_step]
+        impact = "The canonical URL tells Google which version of a page is the authoritative one when the same content is accessible at multiple URLs.\nSetting it correctly consolidates ranking signals and prevents duplicate content penalties."
+        summary = f"Set canonical URL to {canonical_url}"
+
+    elif action == "wp_add_schema":
+        schema_json = generated.get("schema_json", "{}")
+        schema_type = generated.get("schema_type", "WebPage")
+        steps = [
+            login_step,
+            open_step,
+            {"step": "Add a Custom HTML block", "detail": "Scroll to the very bottom of the editor content. Click the '+' button to add a block → search 'Custom HTML' → select it."},
+            {"step": "Paste the schema markup", "detail": f"Inside the Custom HTML block, paste:\n\n<script type=\"application/ld+json\">\n{schema_json}\n</script>"},
+            save_step,
+        ]
+        impact = f"This adds {schema_type} structured data — machine-readable info that search engines use to understand your page and show rich results.\nPages with schema markup can earn enhanced SERP features (star ratings, FAQs, breadcrumbs) that increase CTR by 20-30%."
+        summary = f"Add {schema_type} JSON-LD schema to {target_url}"
+
+    elif action == "wp_update_image_alt":
+        images = generated.get("images", [])
+        img_steps = [
+            {"step": f"Image {i+1}: {img.get('filename', 'image')}",
+             "detail": f"Media Library → click image → set Alt Text to:\n\n{img.get('suggested_alt', '')}"}
+            for i, img in enumerate(images[:10])
+        ]
+        steps = [
+            login_step,
+            {"step": "Open Media Library", "detail": "In the left sidebar go to Media → Library."},
+            *img_steps,
+            {"step": "Alternative: update in page editor", "detail": "Open the page → click each image block → update 'Alt text' in the right sidebar → Update."},
+        ]
+        impact = "Alt text describes images to Google (which cannot see them) and contributes keyword signals to the page's topic relevance.\nMissing alt text also fails WCAG accessibility standards, which affects both usability and SEO."
+        summary = f"Add alt text to {len(images)} image(s) on {target_url}"
+
+    elif action == "wp_update_sitemap":
+        sitemap_url = wp_url.rstrip("/") + "/sitemap.xml"
+        if plugin == "yoast":
+            sitemap_step = {"step": "Verify Yoast sitemap is enabled", "detail": "Go to Yoast SEO (left sidebar) → Features → confirm 'XML Sitemaps' is toggled On → Save changes."}
+        elif plugin == "rankmath":
+            sitemap_step = {"step": "Verify Rank Math sitemap", "detail": "Rank Math → Sitemap Settings → confirm the sitemap is active."}
+        else:
+            sitemap_step = {"step": "Check your sitemap", "detail": f"Open {sitemap_url} in a browser. If you get a 404, install Yoast SEO to auto-generate a sitemap."}
+        steps = [
+            login_step,
+            sitemap_step,
+            {"step": "Confirm sitemap loads", "detail": f"Open in a new browser tab:\n\n{sitemap_url}\n\nYou should see an XML list of your pages."},
+            {"step": "Submit to Google Search Console", "detail": f"Go to search.google.com/search-console → your site → Sitemaps → paste:\n\n{sitemap_url}\n\n→ Submit"},
+            {"step": "Submit to Bing Webmaster Tools", "detail": f"Go to bing.com/webmasters → Sitemaps → Submit sitemap → paste:\n\n{sitemap_url}"},
+        ]
+        impact = "A submitted sitemap tells search engines about all your pages so they are crawled and indexed faster.\nNew or updated content is typically discovered 2-5x faster with an active sitemap submission vs. waiting for natural crawler discovery."
+        summary = f"Submit sitemap to Google and Bing: {sitemap_url}"
+
+    else:
+        steps = _manual_steps_for_action(action, task, target_url)
+        impact = "Complete this task to improve your site's search engine visibility."
+        summary = task.description
+
+    return steps, summary, impact
+
+
 def _manual_steps_for_action(action: str, task: Task, target_url: str) -> list[dict]:
     desc = task.description
 
@@ -476,27 +632,34 @@ def preview_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
                 current={}, suggested={}, needs_credentials=True,
             )
 
-        post_id, endpoint = _find_post(session, api, target)
         plugin = _detect_plugin(session, wp_url)
 
-        # Fetch current post state
-        current: dict = {}
+        # Try to find the post (best-effort — instructions work without it too)
+        post_id, endpoint = _find_post(session, api, target)
+        page_name = ""
         page_text = ""
-        if post_id:
-            snap = _snapshot(session, api, post_id, endpoint)
-            page_text = re.sub(r'<[^>]+>', ' ', snap["content"])[:1000]
-            current = {
-                "meta_title": snap["title"],
-                "meta_description": snap.get("yoast_seo", {}).get("meta_description", "")
-                    or snap.get("meta", {}).get("rank_math_description", "")
-                    or snap["excerpt"],
-                "canonical": snap.get("yoast_seo", {}).get("canonical", "")
-                    or snap.get("meta", {}).get("rank_math_canonical_url", ""),
-                "excerpt": snap["excerpt"],
-                "plugin": plugin,
-            }
+        current: dict = {}
 
-        suggested: dict = {}
+        if post_id:
+            try:
+                snap = _snapshot(session, api, post_id, endpoint)
+                page_name = snap["title"]
+                page_text = re.sub(r'<[^>]+>', ' ', snap["content"])[:1000]
+                current = {
+                    "meta_title": snap["title"],
+                    "meta_description": snap.get("yoast_seo", {}).get("meta_description", "")
+                        or snap.get("meta", {}).get("rank_math_description", "")
+                        or snap["excerpt"],
+                    "canonical": snap.get("yoast_seo", {}).get("canonical", "")
+                        or snap.get("meta", {}).get("rank_math_canonical_url", ""),
+                    "excerpt": snap["excerpt"],
+                    "plugin": plugin,
+                }
+            except Exception:
+                pass
+
+        # Generate optimised content
+        generated: dict = {}
 
         if action == "wp_update_meta":
             meta_title, meta_desc = _generate_meta(
@@ -505,58 +668,7 @@ def preview_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
                 target_url=target,
                 task_description=task.description,
             )
-            suggested = {"meta_title": meta_title, "meta_description": meta_desc}
-            summary = f'Update meta title and description on {target}'
-
-        elif action == "wp_set_canonical":
-            suggested = {"canonical": target}
-            summary = f'Set canonical URL to {target}'
-
-        elif action == "wp_add_schema":
-            existing_schema_types = []
-            if post_id:
-                r_get = session.get(f"{api}/{endpoint}/{post_id}",
-                                    params={"context": "edit"}, timeout=10)
-                content_raw = r_get.json().get("content", {}).get("raw", "")
-                for s in re.findall(r'application/ld\+json[^>]*>(.*?)</script>',
-                                    content_raw, re.DOTALL | re.IGNORECASE):
-                    try:
-                        d = json.loads(s)
-                        if d.get("@type"):
-                            existing_schema_types.append(str(d["@type"]))
-                    except Exception:
-                        pass
-            schema_obj = _generate_schema(
-                page_title=current.get("meta_title", ""),
-                page_content=page_text,
-                target_url=target,
-                existing_schema_types=existing_schema_types,
-            )
-            suggested = {
-                "schema_type": schema_obj.get("@type", "WebPage"),
-                "schema_json": json.dumps(schema_obj, indent=2),
-                "existing_types": existing_schema_types,
-            }
-            summary = f'Add {schema_obj.get("@type", "WebPage")} JSON-LD schema to {target}'
-
-        elif action == "wp_update_image_alt":
-            images = []
-            if post_id:
-                r_media = session.get(f"{api}/media",
-                                      params={"per_page": 20, "parent": post_id}, timeout=15)
-                for item in r_media.json():
-                    if not item.get("alt_text", "").strip():
-                        img_title = item.get("title", {}).get("rendered", "")
-                        img_slug = item.get("slug", img_title)
-                        suggested_alt = _generate_alt_text(img_title, img_slug, page_text[:200])
-                        images.append({
-                            "id": item["id"],
-                            "filename": img_slug,
-                            "current_alt": "",
-                            "suggested_alt": suggested_alt,
-                        })
-            suggested = {"images": images}
-            summary = f'Add alt text to {len(images)} image(s) on {target}'
+            generated = {"meta_title": meta_title, "meta_description": meta_desc}
 
         elif action == "wp_update_content":
             new_title = _claude_generate(
@@ -574,21 +686,68 @@ Rules:
 - Return ONLY the heading text, nothing else""",
                 max_tokens=80,
             )
-            suggested = {
-                "h1_title": new_title,
-                "current_h1": current.get("meta_title", ""),
+            generated = {"h1_title": new_title, "current_h1": current.get("meta_title", "")}
+
+        elif action == "wp_set_canonical":
+            generated = {"canonical": target}
+
+        elif action == "wp_add_schema":
+            existing_schema_types: list[str] = []
+            if post_id:
+                try:
+                    r_get = session.get(f"{api}/{endpoint}/{post_id}",
+                                        params={"context": "edit"}, timeout=10)
+                    content_raw = r_get.json().get("content", {}).get("raw", "")
+                    for s in re.findall(r'application/ld\+json[^>]*>(.*?)</script>',
+                                        content_raw, re.DOTALL | re.IGNORECASE):
+                        try:
+                            d = json.loads(s)
+                            if d.get("@type"):
+                                existing_schema_types.append(str(d["@type"]))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            schema_obj = _generate_schema(
+                page_title=current.get("meta_title", ""),
+                page_content=page_text,
+                target_url=target,
+                existing_schema_types=existing_schema_types,
+            )
+            generated = {
+                "schema_type": schema_obj.get("@type", "WebPage"),
+                "schema_json": json.dumps(schema_obj, indent=2),
+                "existing_types": existing_schema_types,
             }
-            summary = f'Update H1 title on {target}'
 
-        elif action == "wp_update_sitemap":
-            suggested = {"sitemap_url": wp_url.rstrip("/") + "/sitemap.xml",
-                         "action": "Ping Google + Bing with your sitemap URL"}
-            summary = "Ping search engines with updated sitemap"
+        elif action == "wp_update_image_alt":
+            images: list[dict] = []
+            if post_id:
+                try:
+                    r_media = session.get(f"{api}/media",
+                                          params={"per_page": 20, "parent": post_id}, timeout=15)
+                    for item in r_media.json():
+                        if not item.get("alt_text", "").strip():
+                            img_title = item.get("title", {}).get("rendered", "")
+                            img_slug = item.get("slug", img_title)
+                            suggested_alt = _generate_alt_text(img_title, img_slug, page_text[:200])
+                            images.append({
+                                "id": item["id"],
+                                "filename": img_slug,
+                                "current_alt": "",
+                                "suggested_alt": suggested_alt,
+                            })
+                except Exception:
+                    pass
+            generated = {"images": images}
 
-        else:
-            steps = _manual_steps_for_action(action, task, target)
-            suggested = {"steps": steps, "note": None}
-            summary = task.description
+        # Build step-by-step WP Admin instructions with exact navigation paths
+        steps, summary, impact = _wp_admin_steps(
+            action=action, task=task, target_url=target,
+            plugin=plugin, wp_url=wp_url,
+            page_name=page_name, page_id=post_id,
+            generated=generated,
+        )
 
         return TaskPreview(
             task_id=task.id,
@@ -596,7 +755,7 @@ Rules:
             target_url=target,
             summary=summary,
             current=current,
-            suggested=suggested,
+            suggested={"steps": steps, "impact": impact, **generated},
         )
 
     except Exception as e:
@@ -624,6 +783,11 @@ def execute_task(task: Task, wp_url: str, wp_username: str, wp_app_password: str
     if action in ("geo_create_llms_txt", "geo_update_ai_meta"):
         return TaskResult(task_id=task.id, status="completed", verified=False,
                           action_taken=f"AI visibility task noted: {task.title}. Requires SSH/manual step.")
+
+    # ── Manual steps followed by user → mark complete ───────────────────────
+    if approved_content and approved_content.get("manual"):
+        return TaskResult(task_id=task.id, status="completed",
+                          action_taken="Manual steps followed by user.", verified=False)
 
     # ── WordPress tasks ──────────────────────────────────────────────────────
     if not wp_url or not wp_username or not wp_app_password:
